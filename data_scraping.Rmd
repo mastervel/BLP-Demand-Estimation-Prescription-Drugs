@@ -1,0 +1,220 @@
+---
+title: "data_scrap"
+output: html_document
+date: "2023-06-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(RSelenium)
+library(wdman)
+library(netstat)
+library(tidyverse)
+library(stringr)
+
+selenium()
+
+selenium_obj <- selenium(retcommand = T, check = F)
+binman::list_versions("chromedriver")
+remote_driver <- rsDriver(browser = "chrome",
+                          chromever = "110.0.5481.77",
+                          verbose = F,
+                          port = free_port())
+
+remDr <- remote_driver$client
+```
+
+```{r}
+remDr$open()
+remDr$close()
+remDr$navigate("https://dailymed.nlm.nih.gov/dailymed/")
+search_obj <- remDr$findElement(using = "id", "searchQuery")
+search_obj$clickElement()
+#search_obj$sendKeysToElement(list("13107008305", key = "enter"))
+search_obj$sendKeysToElement(list("47781023001", key = "enter"))
+consumer_obj <- remDr$findElement(using = "id", "anch_dj_105")
+consumer_obj$clickElement()
+xml_obj <- remDr$findElement(using = "id", "anch_dj_107")
+xml_obj$clickElement()
+current_url <- remDr$getCurrentUrl()
+current_url[[1]]
+```
+Troubleshooting code for pages with more than one drug label.
+```{r}
+for (i in ndc_list) {
+  search_obj <- remDr$findElement(using = "id", "searchQuery")
+  search_obj$clickElement()
+  search_obj$clearElement()
+  search_obj$sendKeysToElement(list(i, key = "enter"))
+  current_url <- remDr$getCurrentUrl()
+  if (str_detect(current_url[[1]], "query") == TRUE) {
+    no_of_results <- remDr$findElement(using = "xpath", "/html/body/div[2]/div[3]/div/div[1]/div[1]/div/h1/span[2]")$getElementText()
+    #print(no_of_results)
+    if (no_of_results[[1]] == "(0 results)"){
+      print("No Results Found!")
+    } else {
+      print(paste0(i, " has ", gsub("[^0-9]", "", no_of_results[[1]]), " Results Found!"))
+    }
+  }
+}
+```
+
+```{r}
+problematic_ndc_list <- c("47781023001","52536062501", "00121050416", "67877046290", "47781022901", "47781022905")
+
+
+# for the NDC code: 13107008305
+xml_obj <- remDr$findElement(using = "id", "anch_dj_107")
+href_obj <- xml_obj$getElementAttribute(attrName = "href")[[1]]
+str_locate(href_obj, "setid=")[,"end"]
+str_locate(href_obj, "&type=zip")
+substr(href_obj, str_locate(href_obj, "setid=")[1,"end"] + 1, str_locate(href_obj, "&type=zip")[,"start"] - 1)
+```
+
+```{r}
+full_data <- read.csv(file = "D:\\data\\clean data\\NH_MA_data_2021.csv", colClasses=c("NDC"="character"))
+ndc_list <- unique(full_data$NDC)
+```
+
+```{r }
+download_xml_files <- function(ndc_list){
+  
+  #Setting up the remote Driver
+  remote_driver <- rsDriver(browser = "chrome",
+                          chromever = "110.0.5481.77",
+                          verbose = F,
+                          port = free_port())
+
+  remDr <- remote_driver$client
+  remDr$open()
+  remDr$navigate("https://dailymed.nlm.nih.gov/dailymed/")
+  
+  #Creating an empty data frame containing the NDC code with their respective text data associated
+  num_rows <- length(ndc_list)
+  ndc_package_ref <- as.data.frame(matrix(ncol = 2, nrow = num_rows))
+  colnames(ndc_package_ref) <- c("NDC", "filename")
+  
+  #Downloads text files and appends to the ndc_package_ref data frame
+  for (i in 1:length(ndc_list)) {
+    search_obj <- remDr$findElement(using = "id", "searchQuery")
+    search_obj$clickElement()
+    search_obj$clearElement()
+    search_obj$sendKeysToElement(list(ndc_list[i], key = "enter"))
+    
+    current_url <- remDr$getCurrentUrl()
+    
+    #Checks to see if there are no results or more than 1 result for a specific NDC code
+    if (str_detect(current_url[[1]], "query") == TRUE) {
+      no_of_results <- remDr$findElement(using = "xpath", "/html/body/div[2]/div[3]/div/div[1]/div[1]/div/h1/span[2]")$getElementText()
+
+      #Checks if there are no results for a specific NDC code
+      if (no_of_results[[1]] == "(0 results)"){
+        ndc_package_ref$NDC[i] <- ndc_list[i]
+        ndc_package_ref$filename[i] <- "No Results Found"
+        
+      } else {
+        # If the if statement above is FALSE that means there should be more than 1 result.
+        # Here we append to the ndc_package_ref data frame with the number of results.
+        # I will be handling these NDC codes separately. 
+        ndc_package_ref$NDC[i] <- ndc_list[i]
+        ndc_package_ref$filename[i] <- paste0(gsub("[^0-9]", "", no_of_results[[1]]), " Results Found!")
+      }
+      
+    } else {
+      # Here we have 1 result associated with a specific NDC code so we can simply download the text file from the page. 
+      xml_obj <- remDr$findElement(using = "id", "anch_dj_107")
+      href_obj <- xml_obj$getElementAttribute(attrName = "href")[[1]]
+      file_name <- substr(href_obj, str_locate(href_obj, "setid=")[1,"end"] + 1, str_locate(href_obj, "&type=zip")[,"start"] - 1)
+    
+      ndc_package_ref$NDC[i] <- ndc_list[i]
+      ndc_package_ref$filename[i] <- file_name
+      
+      xml_obj$clickElement()
+    }
+  }
+  
+  Sys.sleep(2)
+  remDr$close()
+  
+  #Saves the ndc_package_ref data frame as a csv
+  write.csv(ndc_package_ref, file = "D:\\data\\clean data\\ref.csv", row.names = FALSE, quote = FALSE)
+  
+  #Removes Duplicate Files
+  folder_path <- "C:\\Users\\Arts User\\Downloads"
+  file_list <- list.files(folder_path, full.names = TRUE)
+  condition <- "("
+  escaped_condition <- gsub("([\\(\\)])", "\\\\\\1", condition)
+  filtered_files <- file_list[grep(escaped_condition, file_list)]
+  file.remove(filtered_files)
+  
+  return(ndc_package_ref)
+}
+
+ref_list <- download_xml_files(ndc_list)
+
+```
+
+```{r}
+folder_path <- "C:\\Users\\Arts User\\Downloads"
+file_list <- list.files(folder_path, full.names = TRUE)
+condition <- "("
+escaped_condition <- gsub("([\\(\\)])", "\\\\\\1", condition)
+filtered_files <- file_list[grep(escaped_condition, file_list)]
+file.remove(filtered_files)
+```
+
+```{r}
+full_data <- read.csv(file = "D:\\data\\clean data\\NH_MA_data_2021.csv", colClasses=c("NDC"="character"))
+ndc_list <- unique(full_data$NDC)
+ndc_list <- head(ndc_list, 10)
+
+download_xml <- function(ndc_list){
+  remDr$open()
+  remDr$navigate("https://dailymed.nlm.nih.gov/dailymed/")
+  for (ndc in ndc_list){
+    search_obj <- remDr$findElement(using = "id", "searchQuery")
+    search_obj$clickElement()
+    search_obj$sendKeysToElement(list(as.character(ndc), key = "enter"))
+    consumer_obj <- remDr$findElement(using = "id", "anch_dj_105")
+    consumer_obj$clickElement()
+    xml_obj <- remDr$findElement(using = "id", "anch_dj_107")
+    xml_obj$clickElement()
+  }
+}
+download_xml(ndc_list)
+```
+
+```{r}
+download_xml <- function(ndc_list) {
+  remDr$open()
+  remDr$navigate("https://dailymed.nlm.nih.gov/dailymed/")
+
+  failed_ndc_list <- vector("character", length = 0)
+
+  for (ndc in ndc_list) {
+    tryCatch({
+      search_obj <- remDr$findElement(using = "id", "searchQuery")
+      search_obj$clickElement()
+      search_obj$clearElement()
+      search_obj$sendKeysToElement(list(ndc, key = "enter"))
+
+      consumer_obj <- remDr$findElement(using = "id", "anch_dj_105")
+      consumer_obj$clickElement()
+
+      xml_obj <- remDr$findElement(using = "id", "anch_dj_107")
+      xml_obj$clickElement()
+    }, error = function(e) {
+      # Error handling code
+      print(paste("Error occurred for NDC:", ndc))
+      failed_ndc_list <- append(failed_ndc_list, ndc)  # Add failed NDC to the list
+    })
+  }
+  Sys.sleep(3)
+  remDr$close()
+  return(failed_ndc_list)  # Return the list of failed NDCs
+}
+failed_ndc <- download_xml(ndc_list)
+```
