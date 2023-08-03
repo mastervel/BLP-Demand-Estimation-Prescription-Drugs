@@ -1,0 +1,182 @@
+---
+title: "Pharmacy Data Cleaning"
+author: "Veli Ristimaki"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Creating a database file as I was running into memory issues with how large these data sets are. From the Code below I am only working with the claims from one year (2021). First I imported the raw text file containing the claims data and the provider details data and then I create a database file containing them. Then I remove the imported text file data from memory and all data manipulations and transformation will be performed outside of memory through the database. 
+```{r}
+library(RSQLite)
+library(httr)
+library(readr)
+library(dplyr)
+library(stringr)
+claims_data <- read_delim("D:\\data\\claims\\PUBLICUSE_CLAIM_PC_2021.txt", 
+    delim = "|", escape_double = FALSE, col_types = cols(NDC = col_character(), SERV_PROV_CW_KEY = col_character()), 
+    trim_ws = TRUE)
+con <- dbConnect(RSQLite::SQLite(), dbname = "D:\\data\\phm_database.db", colClasses = c)
+#dbWriteTable(con, "claims_data_2021", claims_data)
+```
+
+The claims data contains NDC codes that I can match with FDA's NDC directory data in order to identify which drugs are opioids more easily and also provide us more product characteristics needed for the estimation later. I have to generate a new variable that converts the 10-digit product ID to an 11-digit package ID. This is because the claims data contain NDC codes that are 11 digits. There are 3 possible combinations of 10 digits which require a zero to be imputed in different positions which the code below accounts for. The NDC directory has data from the package and the product, we should first combine these datasets together. 
+```{r}
+#product_data <- dbGetQuery(con, "SELECT * FROM product_data WHERE (PHARM_CLASSES LIKE '%Opioid%' OR PHARM_CLASSES LIKE '%Amphetamine%' OR PHARM_CLASSES LIKE '%Benzodiazepine%')")
+product_data <- dbGetQuery(con, "SELECT * FROM product_data")
+product_data <- product_data[, c("PRODUCTID","PRODUCTNDC", 
+                                 "PRODUCTTYPENAME", 
+                                 "PROPRIETARYNAME",
+                                 "NONPROPRIETARYNAME",
+                                 "DOSAGEFORMNAME",
+                                 "SUBSTANCENAME",
+                                 "ACTIVE_NUMERATOR_STRENGTH",
+                                 "ACTIVE_INGRED_UNIT",
+                                 "DEASCHEDULE")]
+package_data <- dbGetQuery(con, "SELECT * FROM package_data")
+package_data <- package_data[, c("PRODUCTID","PRODUCTNDC",
+                                 "NDCPACKAGECODE",
+                                 "PACKAGEDESCRIPTION",
+                                 "STARTMARKETINGDATE",
+                                 "ENDMARKETINGDATE")]
+prod_pack_data <- merge(product_data,package_data, by = c("PRODUCTID","PRODUCTNDC"), all = FALSE)
+prod_pack_data <- subset(prod_pack_data, DEASCHEDULE != "")
+for (i in 1:length(prod_pack_data$NDCPACKAGECODE)) {
+  if (substr(prod_pack_data$NDCPACKAGECODE[i], 5, 5) == "-") {
+    #ten_digit_combinations$combination[i] <- "4-4-2"
+    prod_pack_data$NDC[i] <- paste0("0", prod_pack_data$NDCPACKAGECODE[i])
+  }
+  else if (substr(prod_pack_data$NDCPACKAGECODE[i], 10, 10) == "-") {
+    #ten_digit_combinations$combination[i] <- "5-3-2"
+    prod_pack_data$NDC[i] <- paste0(substr(prod_pack_data$NDCPACKAGECODE[i], 1,6),"0", substr(prod_pack_data$NDCPACKAGECODE[i], 7,12))
+  }
+  else if (substr(prod_pack_data$NDCPACKAGECODE[i], 11, 11) == "-") {
+    #ten_digit_combinations$combination[i] <- "5-4-1"
+    prod_pack_data$NDC[i] <- paste0(substr(prod_pack_data$NDCPACKAGECODE[i], 1,11),"0", substr(prod_pack_data$NDCPACKAGECODE[i], 12,12))
+  }
+  prod_pack_data$NDC[i] <- gsub("-", "", prod_pack_data$NDC[i])
+}
+
+rm(package_data)
+rm(product_data)
+gc()
+
+
+#c2_drugs <- subset(product_data, DEASCHEDULE == "CII")
+#diff_phm_classes <- as.data.frame(unique(product_data$PHARM_CLASSES))
+
+#opioids <- dbGetQuery(con, "SELECT * FROM product_data WHERE (PHARM_CLASSES LIKE '%Opioid%' OR PHARM_CLASSES LIKE '%Amphetamine%' OR PHARM_CLASSES LIKE '%Benzodiazepine%')")
+
+```
+Now we can merge the NDC directory data with the claims data so that we only have claims related to schedule 2 drugs which contain all the prescription opioids and all other potential substitutes that are not opioids. 
+```{r}
+claims_prod_data <- merge(claims_data, prod_pack_data, by = "NDC", all = FALSE)
+provider_info_data <- read_delim("D:/data/PUBLICUSE_PROVIDER_DETAIL.txt", delim = "|", escape_double = FALSE, col_types = cols(PROV_KEY = col_character(), PROV_CW_KEY = col_character(), PROV_TYPE_ORIG = col_integer(), NH_COUNTY_CODE = col_integer()), trim_ws = TRUE)
+names(claims_prod_data)[names(claims_prod_data) == "SERV_PROV_CW_KEY"] <- "PROV_KEY"
+#states_list <- as.data.frame(table(provider_info_data$PROV_CLINIC_STATE))
+provider_info_data <- subset(provider_info_data, PROV_CLINIC_STATE == "MA" | PROV_CLINIC_STATE == "NH")
+#typeof(provider_info_data$SERV_PROV_CW_KEY)
+#id_15351_list <- subset(provider_info_data, SERV_PROV_CW_KEY == "15351")
+#claims_15351_list <- subset(claims_prod_data, SERV_PROV_CW_KEY == "15351")
+full_data <- inner_join(provider_info_data, claims_prod_data, by = "PROV_KEY")
+```
+
+
+```{r}
+ids <- unique(full_data$PRODUCTID)
+length(unique(full_data$PROPRIETARYNAME))
+my_ids <- data.frame(ids)
+length(my_ids$ids)
+for (i in 1:length(my_ids$ids)) {
+  if (substr(my_ids$ids[i], 1, 1) == "_") {
+    my_ids$ids[i] <- substr(my_ids$ids, 2, stop = FALSE)
+  }
+}
+for (i in 1:length(my_ids$ids)) {
+  my_ids$nchar[i] <- nchar(my_ids$ids[i])
+  my_ids$pos[i] <- str_locate(my_ids$ids[i], "_")[,"start"]
+}
+unique(my_ids$nchar)
+
+str <- "51525-5901_405a8c9e-40b7-4179-9f0e-c55460a60a54"
+str_locate(str, "_")[,"start"]
+new_str <- substr(str, str_locate(str, "_")[,"start"] + 1, nchar(str))
+print(paste0(str, "   ", new_str))
+```
+
+```{r}
+for (i in 1:length(my_ids$ids)) {
+  #my_ids$pos <- str_locate(my_ids$ids[i], "_")[,"start"]
+  my_ids$new_ids[i] <- substr(my_ids$ids[i], str_locate(my_ids$ids[i], "_")[,"start"] + 1, nchar(my_ids$ids[i]))
+}
+new_ids <- as.vector(my_ids$new_ids)
+```
+
+
+```{r}
+folder_path <- "D:\\full release package data\\all"
+
+# Get the list of files in the folder
+file_list <- list.files(folder_path, full.names = TRUE)
+
+# Filter the file list based on the strings to match
+filtered_files <- file_list[grepl(paste(new_ids, collapse = "|"), file_list)]
+filtered_files <- file_list[sapply(new_ids, function(pattern) grepl(pattern, file_list))]
+```
+
+```{r}
+test_path <- "D:\\test"
+
+files <- list.files(test_path)
+
+# Iterate over each file
+for (file in files) {
+  # Generate the new lowercase filename
+  new_filename <- tolower(file)
+  #print(new_filename)
+  # Construct the full paths for the original and new filenames
+  original_path <- file.path(test_path, file)
+  new_path <- file.path(test_path, new_filename)
+  print(new_path)
+  # Rename the file to the new lowercase filename
+  file.rename(original_path, new_path)
+}
+folder_path <- "D:\\full release package data\\all"
+
+# Get the list of files in the folder
+file_list <- list.files(folder_path, full.names = TRUE)
+
+target_files <- list()
+
+for (file in file_list) {
+  if (str_locate(file, "_")[,"start"] == 42) {
+    for (drug in my_ids$new_ids) {
+      if (drug == tolower(substr(file, 43, 78))) {
+        #if (!(file %in% target_files)) {
+        target_files <- c(target_files, file)
+      }
+    }
+  } else {
+    break 
+    print("FAILURE")}
+}
+
+for (drug in head(my_ids$new_ids)) {
+      print(drug)
+    }
+
+test_list <- list()
+test_list <- c(test_list, 1)
+
+str_locate(file_list[1], "_")[,"start"]
+tolower(substr(file_list[1], 43,))
+```
+
+
+```{r}
+write.csv(full_data, file = "D:\\data\\clean data\\test", row.names = FALSE)
+```
+
+
